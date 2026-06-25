@@ -15,6 +15,8 @@ Trained on a single RTX 5090 Laptop GPU (~30 hours, 80K/100K steps):
 
 BLEU breakdown (beam-4, full): `63.1/36.4/23.0/14.8  BP=0.948`
 
+Current pkt cost me 11 hours to train, and 1 houe to test in single NVIDIA GeForce RTX 5090.
+
 ## Project Structure
 
 ```
