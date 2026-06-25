@@ -1,0 +1,4 @@
+__pycache__
+artifacts/*
+
+!artifacts/pytorch_transformer.pt
