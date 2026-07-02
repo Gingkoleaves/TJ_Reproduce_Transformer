@@ -248,12 +248,15 @@ Q3: 拆分transformer时出现跨部件的调用
 A3: 提供专门方法实现；进一步地，直接把需要调用的操作封装在部件中(position-embedding、tgt_mask)
 
 Q4: 参数初始化没有明确写出
-A4: 使用Xavier/标准正态；embedding使用xavier发现smoke测试时不下降，debug发现瓶颈时pos盖过bpe的内容[0.7：0.4]，根号d-model缩放不够；调整为使用N(0,1)后成功返回1:22[bpe占主导]，但是初始几步loss太大，调整为0.15减少初始的loss
+A4: 使用Xavier/标准正态；embedding使用xavier发现smoke测试时不下降，debug发现瓶颈时pos盖过bpe的内容[0.7：0.4]，根号d-model缩放**ERROR：应该是^-0.5**；修复后成功返回1:1
 
 Q5: bpe重新训练
 A5: 存储vocab和merge过程来避免反复训练
 
 Q6: mask具体实现
 A6: 填入-inf在attn层中用softmax
+
+Q7: 过拟合[log](log.txt)
+A7: answer
 
 考虑减少大量数据的反复cp-paste，resort和sample时通过index操作和getitem
