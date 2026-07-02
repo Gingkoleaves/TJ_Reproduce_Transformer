@@ -1,34 +1,54 @@
-# Transformer Encoder module.
+# Transformer Encoder module (paper §3.1).
 #
-# For now this wraps PyTorch's built-in nn.TransformerEncoderLayer stack.
-# A later step will replace the internal layer with a hand-written
-# combination of multi-head attention + feed-forward blocks.
+# Hand-written encoder layer built from MultiHeadAttention (attention.py) and
+# PositionwiseFeedForward (layers.py). Post-LayerNorm: each sublayer computes
+# LayerNorm(x + Dropout(Sublayer(x))).
 from torch import nn
 
 from Transformer_handmade.config import TransformerConfig
+from Transformer_handmade.model.attention import MultiHeadAttention
+from Transformer_handmade.model.layers import PositionwiseFeedForward
+
+
+class EncoderLayer(nn.Module):
+    """Self-attention sublayer followed by a feed-forward sublayer."""
+
+    def __init__(self, config: TransformerConfig) -> None:
+        super().__init__()
+        self.self_attn = MultiHeadAttention(config.d_model, config.h, config.dropout)
+        self.feed_forward = PositionwiseFeedForward(
+            config.d_model, config.d_ff, config.dropout
+        )
+        self.norm1 = nn.LayerNorm(config.d_model)
+        self.norm2 = nn.LayerNorm(config.d_model)
+        self.dropout1 = nn.Dropout(config.dropout)
+        self.dropout2 = nn.Dropout(config.dropout)
+
+    def forward(self, x, src_key_padding_mask=None):
+        # Self-attention sublayer
+        attn = self.self_attn(x, x, x, key_padding_mask=src_key_padding_mask)
+        x = self.norm1(x + self.dropout1(attn))
+        # Feed-forward sublayer
+        ff = self.feed_forward(x)
+        x = self.norm2(x + self.dropout2(ff))
+        return x
 
 
 class Seq2SeqEncoder(nn.Module):
-    """Stack of N identical encoder layers (paper §3.1).
+    """Stack of N identical encoder layers with a final LayerNorm.
 
-    Post-LayerNorm, ReLU feed-forward, batch-first tensors. No extra final
-    LayerNorm — the original Transformer applies LayerNorm inside each
-    sublayer only.
+    Matches ``nn.Transformer``, which applies a LayerNorm to the encoder
+    output. This bounds the residual-stream magnitude feeding the decoder's
+    cross-attention.
     """
 
     def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
         self.config = config
-        layer = nn.TransformerEncoderLayer(
-            d_model=config.d_model,
-            nhead=config.h,
-            dim_feedforward=config.d_ff,
-            dropout=config.dropout,
-            activation="relu",
-            batch_first=True,
-            norm_first=False,
-        )
-        self.encoder = nn.TransformerEncoder(layer, num_layers=config.N)
+        self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.N)])
+        self.norm = nn.LayerNorm(config.d_model)
 
     def forward(self, x, src_key_padding_mask=None):
-        return self.encoder(x, src_key_padding_mask=src_key_padding_mask)
+        for layer in self.layers:
+            x = layer(x, src_key_padding_mask=src_key_padding_mask)
+        return self.norm(x)

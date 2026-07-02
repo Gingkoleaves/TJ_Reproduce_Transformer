@@ -35,7 +35,9 @@ class Seq2SeqEmbedding(nn.Module):
         self.positional_encoding = PositionalEncoding(
             config.d_model, config.dropout, config.max_seq_len
         )
-        self.generator = nn.Linear(config.d_model, tgt_vocab_size)
+        # Paper §3.4: the pre-softmax projection shares the embedding weight
+        # (weight tying) and has no bias.
+        self.generator = nn.Linear(config.d_model, tgt_vocab_size, bias=False)
 
         if share_embeddings:
             self.share_weights(src_vocab_size, tgt_vocab_size)

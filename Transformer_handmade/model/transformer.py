@@ -7,7 +7,7 @@ from Transformer_handmade import config
 from Transformer_handmade.config import TransformerConfig
 from Transformer_handmade.model.encoder import Seq2SeqEncoder
 from Transformer_handmade.model.decoder import Seq2SeqDecoder
-from Transformer_handmade.model.embedding import Seq2SeqEmbedding, PositionalEncoding
+from Transformer_handmade.model.embedding import Seq2SeqEmbedding
 
 class Seq2SeqTransformer(nn.Module):
     def __init__(
@@ -32,9 +32,27 @@ class Seq2SeqTransformer(nn.Module):
         self._init_params()
 
     def _init_params(self) -> None:
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+        # Xavier for every projection / FFN / generator Linear weight.
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        # Token embeddings use std = d_model**-0.5 (the Tensor2Tensor / paper
+        # §3.4 recipe). After the ×sqrt(d_model) multiply in Seq2SeqEmbedding
+        # this gives an *effective* unit-scale embedding (std ≈ 1.0), balanced
+        # against the sinusoidal positional encoding (amplitude ≈ 1). Blanket
+        # xavier underscales it (effective std ≈ 0.17 → PE dominates → unigram
+        # collapse); a raw std of 0.15 overscales it (effective ≈ 3.4 → logits
+        # blow up via the tied generator → the val loss diverges). d_model**-0.5
+        # is the correct middle ground.
+        # Applied AFTER the Linear pass so a weight-tied generator inherits this
+        # init (its weight IS the embedding) rather than the xavier above.
+        emb_std = self.config.d_model ** -0.5
+        nn.init.normal_(self.embeddings.src_embedding.weight, mean=0.0, std=emb_std)
+        if not self.share_embeddings:
+            nn.init.normal_(self.embeddings.tgt_embedding.weight, mean=0.0, std=emb_std)
 
     def set_pad_ids(self, src_pad_id: int, tgt_pad_id: int) -> None:
         self.src_pad_id = src_pad_id

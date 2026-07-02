@@ -30,8 +30,8 @@ class TransformerConfig:
     
     # ====== Data ======
     data_format: str = "csv"
-    src_lang: str = "de"
-    tgt_lang: str = "en"
+    src_lang: str = "en"
+    tgt_lang: str = "de"
     data_dir: Path = Path("Transformer_handmade/data")
     csv_dirname: str = "en-de-csv"
     parquet_dirname: str = "en-de-parquet"
