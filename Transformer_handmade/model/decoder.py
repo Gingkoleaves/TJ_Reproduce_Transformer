@@ -56,18 +56,16 @@ class DecoderLayer(nn.Module):
 
 
 class Seq2SeqDecoder(nn.Module):
-    """Stack of N identical decoder layers with a final LayerNorm.
+    """Stack of N identical decoder layers.
 
-    Matches ``nn.Transformer``, which applies a LayerNorm to the decoder
-    output. This bounds the residual-stream magnitude feeding the tied
-    output projection, keeping the logit scale stable across training.
+    No extra final LayerNorm: in the paper's Post-LN structure each sublayer
+    already ends with LayerNorm, so the last layer's output is normalized.
     """
 
     def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.N)])
-        self.norm = nn.LayerNorm(config.d_model)
 
     def forward(self, x, memory, tgt_key_padding_mask=None, memory_key_padding_mask=None):
         tgt_mask = self.generate_square_subsequent_mask(x.size(1), x.device)
@@ -79,7 +77,7 @@ class Seq2SeqDecoder(nn.Module):
                 tgt_key_padding_mask=tgt_key_padding_mask,
                 memory_key_padding_mask=memory_key_padding_mask,
             )
-        return self.norm(x)
+        return x
 
     @staticmethod
     def generate_square_subsequent_mask(size: int, device: torch.device) -> torch.Tensor:

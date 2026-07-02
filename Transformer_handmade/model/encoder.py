@@ -35,20 +35,18 @@ class EncoderLayer(nn.Module):
 
 
 class Seq2SeqEncoder(nn.Module):
-    """Stack of N identical encoder layers with a final LayerNorm.
+    """Stack of N identical encoder layers.
 
-    Matches ``nn.Transformer``, which applies a LayerNorm to the encoder
-    output. This bounds the residual-stream magnitude feeding the decoder's
-    cross-attention.
+    No extra final LayerNorm: in the paper's Post-LN structure each sublayer
+    already ends with LayerNorm, so the last layer's output is normalized.
     """
 
     def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.N)])
-        self.norm = nn.LayerNorm(config.d_model)
 
     def forward(self, x, src_key_padding_mask=None):
         for layer in self.layers:
             x = layer(x, src_key_padding_mask=src_key_padding_mask)
-        return self.norm(x)
+        return x

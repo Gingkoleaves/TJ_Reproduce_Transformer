@@ -75,7 +75,6 @@ def main() -> None:
                 )
                 loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad_norm)
             noam.step()
             noam.zero_grad()
 

@@ -22,7 +22,6 @@ class TransformerConfig:
     adam_beta1: float = 0.9
     adam_beta2: float = 0.98
     adam_eps: float = 1e-9
-    clip_grad_norm: float = 1.0
     grad_accum_steps: int = 8   # effective batch = 512 (paper ~833, relaxed for single GPU)
 
     # ====== AMP (bfloat16 — no scaler needed, stable on RTX 5090) ======
