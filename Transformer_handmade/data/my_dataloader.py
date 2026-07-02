@@ -214,7 +214,7 @@ class TranslationBatch:
     src_texts: list[str]
     tgt_texts: list[str]
 
-
+# 整理sample序列为同长度，用pad补齐
 def build_collate_fn(pad_id: int):
     def collate_fn(samples: list[dict[str, Any]]) -> TranslationBatch:
         src_ids = [sample["src_ids"] for sample in samples]

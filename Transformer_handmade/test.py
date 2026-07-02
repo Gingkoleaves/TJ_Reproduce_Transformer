@@ -6,7 +6,10 @@ Also includes unit tests for model components and tokenizer.
 
 import argparse
 import warnings
+
+import sys
 from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))  # Add parent directory to sys.path
 
 import sacrebleu
 import torch

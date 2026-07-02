@@ -8,9 +8,12 @@ Key ingredients:
 """
 
 import warnings
-from pathlib import Path
 import random
 import os
+
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))  # Add parent directory to sys.path
 
 import torch
 

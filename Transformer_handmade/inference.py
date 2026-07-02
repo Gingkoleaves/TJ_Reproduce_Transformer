@@ -3,6 +3,10 @@ import warnings
 
 import torch
 
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))  # Add parent directory to sys.path
+
 from Transformer_handmade.config import TransformerConfig, get_config
 from Transformer_handmade.data.my_tokenizer import BPETokenizer
 from Transformer_handmade.model import Seq2SeqTransformer
