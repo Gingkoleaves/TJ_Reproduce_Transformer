@@ -24,14 +24,21 @@ from Transformer_handmade.data.my_tokenizer import BPETokenizer
 # File I/O
 # ---------------------------------------------------------------------------
 
-def _resolve_split_path(config: TransformerConfig, split: str) -> Path:
+def resolve_path(config: TransformerConfig, split: str) -> list[Path]:
+    """Resolve the path to the data file for a given split."""
     if config.data_format == "csv":
-        return config.data_dir / config.csv_dirname / f"wmt14_translate_de-en_{split}.csv"
-    if config.data_format == "parquet":
-        prefix = "train-00000-of-00003" if split == "train" else f"{split}-00000-of-00001"
-        return config.data_dir / config.parquet_dirname / f"{prefix}.parquet"
-    raise ValueError(f"Unsupported data format: {config.data_format}")
-
+        return [config.data_dir / config.csv_dirname / f"wmt14_translate_de-en_{split}.csv"]
+    elif config.data_format == "parquet":
+        search_dir = config.data_dir / config.parquet_dirname
+        pattern = f"{split}-*-of-*.parquet"
+        files = list(search_dir.glob(pattern))
+        
+        if not files:
+            raise FileNotFoundError(f"No parquet files found for pattern: {pattern} in {search_dir}")
+        return files
+    else:
+        raise ValueError(f"Unsupported data format: {config.data_format}")
+   
 
 def load_parallel_records(
     config: TransformerConfig,
@@ -39,17 +46,7 @@ def load_parallel_records(
     limit: int | None = None,
 ) -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
-    if config.data_format == "csv":
-        paths = [_resolve_split_path(config, split)]
-    elif config.data_format == "parquet":
-        split_dir = config.data_dir / config.parquet_dirname
-        paths = sorted(split_dir.glob(f"{split}-*.parquet"))
-    else:
-        raise ValueError(f"Unsupported data format: {config.data_format}")
-
-    if not paths:
-        raise FileNotFoundError(f"No files found for split={split} under format={config.data_format}")
-
+    paths = resolve_path(config, split)
     for path in paths:
         if not path.exists():
             continue

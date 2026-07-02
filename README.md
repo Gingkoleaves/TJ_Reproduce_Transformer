@@ -6,7 +6,7 @@ Built on PyTorch's `nn.Transformer` with hand-rolled training infrastructure: BP
 
 ## Results
 
-Trained on a single RTX 5090 Laptop GPU (~30 hours, 80K/100K steps):
+Trained on a single RTX 5090 Laptop GPU (~30 hours, 80K/100K steps):(Mine are de-en, but paper is en-de)
 
 | Decode | Samples | BLEU | Paper (base) |
 |--------|---------|------|-------------|
@@ -19,7 +19,7 @@ Current pkt cost me 11 hours to train, and 1 houe to test in single NVIDIA GeFor
 
 ## Project Structure
 
-```
+```shell
 Transformer_handmade/
 ├── config.py              # All hyperparameters (dataclass)
 ├── train.py               # Training loop + NoamOpt scheduler

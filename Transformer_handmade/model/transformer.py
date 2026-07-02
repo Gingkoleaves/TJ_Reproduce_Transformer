@@ -3,25 +3,11 @@ import math
 import torch
 from torch import nn
 
+from Transformer_handmade import config
 from Transformer_handmade.config import TransformerConfig
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, dropout: float, max_len: int) -> None:
-        super().__init__()
-        self.dropout = nn.Dropout(dropout)
-
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.pe[:, : x.size(1)]
-        return self.dropout(x)
-
+from Transformer_handmade.model.encoder import Seq2SeqEncoder
+from Transformer_handmade.model.decoder import Seq2SeqDecoder
+from Transformer_handmade.model.embedding import Seq2SeqEmbedding
 
 class Seq2SeqTransformer(nn.Module):
     def __init__(
@@ -37,52 +23,60 @@ class Seq2SeqTransformer(nn.Module):
         self.tgt_pad_id = 0
         self.share_embeddings = share_embeddings
 
-        self.src_embedding = nn.Embedding(src_vocab_size, config.d_model)
-        self.tgt_embedding = nn.Embedding(tgt_vocab_size, config.d_model)
-        self.positional_encoding = PositionalEncoding(config.d_model, config.dropout, config.max_seq_len)
-        self.transformer = nn.Transformer(
-            d_model=config.d_model,
-            nhead=config.h,
-            num_encoder_layers=config.N,
-            num_decoder_layers=config.N,
-            dim_feedforward=config.d_ff,
-            dropout=config.dropout,
-            batch_first=True,
+        self.embeddings = Seq2SeqEmbedding(
+            config, src_vocab_size, tgt_vocab_size, share_embeddings=share_embeddings
         )
-        self.generator = nn.Linear(config.d_model, tgt_vocab_size)
-
-        if share_embeddings:
-            # Tie embedding weights (paper §3.4, Table 3 row E):
-            #   share src_emb, tgt_emb, and output projection.
-            assert src_vocab_size == tgt_vocab_size, (
-                f"Shared embeddings require src_vocab_size == tgt_vocab_size, "
-                f"got {src_vocab_size} != {tgt_vocab_size}"
-            )
-            self.tgt_embedding.weight = self.src_embedding.weight
-            self.generator.weight = self.src_embedding.weight
+        self.encoder = Seq2SeqEncoder(config)
+        self.decoder = Seq2SeqDecoder(config)
 
         self._init_params()
 
     def _init_params(self) -> None:
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+        # Xavier for every projection / FFN / generator Linear weight.
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        # Token embeddings use std = d_model**-0.5 (the Tensor2Tensor / paper
+        # §3.4 recipe). After the ×sqrt(d_model) multiply in Seq2SeqEmbedding
+        # this gives an *effective* unit-scale embedding (std ≈ 1.0), balanced
+        # against the sinusoidal positional encoding (amplitude ≈ 1). Blanket
+        # xavier underscales it (effective std ≈ 0.17 → PE dominates → unigram
+        # collapse); a raw std of 0.15 overscales it (effective ≈ 3.4 → logits
+        # blow up via the tied generator → the val loss diverges). d_model**-0.5
+        # is the correct middle ground.
+        # Applied AFTER the Linear pass so a weight-tied generator inherits this
+        # init (its weight IS the embedding) rather than the xavier above.
+        emb_std = self.config.d_model ** -0.5
+        nn.init.normal_(self.embeddings.src_embedding.weight, mean=0.0, std=emb_std)
+        if not self.share_embeddings:
+            nn.init.normal_(self.embeddings.tgt_embedding.weight, mean=0.0, std=emb_std)
 
     def set_pad_ids(self, src_pad_id: int, tgt_pad_id: int) -> None:
         self.src_pad_id = src_pad_id
         self.tgt_pad_id = tgt_pad_id
 
-    def embed_src(self, src: torch.Tensor) -> torch.Tensor:
-        return self.positional_encoding(self.src_embedding(src) * math.sqrt(self.config.d_model))
+    # ------------------------------------------------------------------
+    # Convenience accessors (used by tests / inference)
+    # ------------------------------------------------------------------
 
-    def embed_tgt(self, tgt: torch.Tensor) -> torch.Tensor:
-        return self.positional_encoding(self.tgt_embedding(tgt) * math.sqrt(self.config.d_model))
+    @property
+    def src_embedding(self) -> nn.Embedding:
+        return self.embeddings.src_embedding
 
-    def generate_square_subsequent_mask(self, size: int, device: torch.device) -> torch.Tensor:
-        return torch.triu(
-            torch.ones(size, size, device=device, dtype=torch.bool),
-            diagonal=1,
-        )
+    @property
+    def tgt_embedding(self) -> nn.Embedding:
+        return self.embeddings.tgt_embedding
+
+    @property
+    def generator(self) -> nn.Linear:
+        return self.embeddings.generator
+
+    @staticmethod
+    def generate_square_subsequent_mask(size: int, device: torch.device) -> torch.Tensor:
+        return Seq2SeqDecoder.generate_square_subsequent_mask(size, device)
 
     def forward(
         self,
@@ -91,16 +85,14 @@ class Seq2SeqTransformer(nn.Module):
         src_padding_mask: torch.Tensor | None = None,
         tgt_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        tgt_mask = self.generate_square_subsequent_mask(tgt_input.size(1), src.device)
-        output = self.transformer(
-            src=self.embed_src(src),
-            tgt=self.embed_tgt(tgt_input),
-            tgt_mask=tgt_mask,
-            src_key_padding_mask=src_padding_mask,
+        memory = self.encoder(self.embeddings.embed_src(src), src_key_padding_mask=src_padding_mask)
+        output = self.decoder(
+            self.embeddings.embed_tgt(tgt_input),
+            memory,
             tgt_key_padding_mask=tgt_padding_mask,
             memory_key_padding_mask=src_padding_mask,
         )
-        return self.generator(output)
+        return self.embeddings.generator(output)
 
     # ------------------------------------------------------------------
     # Greedy decoding (fast, for validation)
@@ -115,22 +107,20 @@ class Seq2SeqTransformer(nn.Module):
         eos_id: int,
         max_len: int,
     ) -> torch.Tensor:
-        memory = self.transformer.encoder(
-            self.embed_src(src),
+        memory = self.encoder(
+            self.embeddings.embed_src(src),
             src_key_padding_mask=src_padding_mask,
         )
         generated = torch.full((src.size(0), 1), bos_id, dtype=torch.long, device=src.device)
 
         for _ in range(max_len - 1):
-            tgt_mask = self.generate_square_subsequent_mask(generated.size(1), src.device)
-            decoder_output = self.transformer.decoder(
-                self.embed_tgt(generated),
+            decoder_output = self.decoder(
+                self.embeddings.embed_tgt(generated),
                 memory,
-                tgt_mask=tgt_mask,
                 tgt_key_padding_mask=generated.eq(self.tgt_pad_id),
                 memory_key_padding_mask=src_padding_mask,
             )
-            next_token_logits = self.generator(decoder_output[:, -1])
+            next_token_logits = self.embeddings.generator(decoder_output[:, -1])
             next_token = next_token_logits.argmax(dim=-1, keepdim=True)
             generated = torch.cat([generated, next_token], dim=1)
             if torch.all(next_token.squeeze(1) == eos_id):
@@ -161,8 +151,8 @@ class Seq2SeqTransformer(nn.Module):
         assert src.size(0) == 1, "beam_search_decode expects batch_size=1"
         device = src.device
 
-        memory = self.transformer.encoder(
-            self.embed_src(src),
+        memory = self.encoder(
+            self.embeddings.embed_src(src),
             src_key_padding_mask=src_padding_mask,
         )  # (1, S, d_model)
 
@@ -176,16 +166,14 @@ class Seq2SeqTransformer(nn.Module):
             B, T = seqs.shape
 
             # Single batched decoder call for all B active beams
-            tgt_mask = self.generate_square_subsequent_mask(T, device)
-            dec_out = self.transformer.decoder(
-                self.embed_tgt(seqs),
+            dec_out = self.decoder(
+                self.embeddings.embed_tgt(seqs),
                 memory.expand(B, -1, -1),
-                tgt_mask=tgt_mask,
                 tgt_key_padding_mask=seqs.eq(self.tgt_pad_id),
                 memory_key_padding_mask=src_padding_mask.expand(B, -1),
             )  # (B, T, d_model)
 
-            log_probs = torch.log_softmax(self.generator(dec_out[:, -1]), dim=-1)  # (B, V)
+            log_probs = torch.log_softmax(self.embeddings.generator(dec_out[:, -1]), dim=-1)  # (B, V)
             topk_lp, topk_ids = torch.topk(log_probs, beam_size, dim=-1)          # (B, beam_size)
 
             # All B×beam_size candidate scores

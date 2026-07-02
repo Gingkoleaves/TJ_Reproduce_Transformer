@@ -222,9 +222,41 @@ load_parallel_records：根据config解析路径并返回records(src-text,tgt-te
 TranslationDataset：负责读取原始记录（records），计算并缓存句子长度，按需进行 Tokenize（将文本转为数字 ID），_getitem_(idx)获取sample
 LengthGroupedBatchSampler：在DataLoader中，接受的“长度信息”，给样本打分排序，并将长度相近的样本“编队”（打包成 TranslationBatch）
 TranslationBatch：存储最终整理好的数据结构（Tensor 和 Mask），直接送往模型进行训练
+
 DataLoader：PyTorch 原生组件。通过 BatchSampler 选定句子索引并通过Dateset.getitem(idx)得到token串，最后调用 collate_fn 进行最终组装。
 ![pipeline-workflow](image.png)
 
 ## transformer
 
 通过dot-product计算预测的embedding和对应token的embedding的相似度，找最大的token作为输出
+
+## problems
+
+Q0: parquet的train有多个文件
+A0: 改path为paths，遍历各path按行读入，用limit约束最多行
+
+Q1: 单独测试各部件，不能保证整体成功
+A1: Smoke train，减少训练规模
+
+Q2: 每次bpe需要重建encode的length
+A2: 引入lengths的cache
+
+Q3: 语法错误和接口设计
+A3: 先写出主干，ai检测
+
+Q3: 拆分transformer时出现跨部件的调用
+A3: 提供专门方法实现；进一步地，直接把需要调用的操作封装在部件中(position-embedding、tgt_mask)
+
+Q4: 参数初始化没有明确写出
+A4: 使用Xavier/标准正态；embedding使用xavier发现smoke测试时不下降，debug发现瓶颈时pos盖过bpe的内容[0.7：0.4]，根号d-model缩放**ERROR：应该是^-0.5**；修复后成功返回1:1
+
+Q5: bpe重新训练
+A5: 存储vocab和merge过程来避免反复训练
+
+Q6: mask具体实现
+A6: 填入-inf在attn层中用softmax
+
+Q7: 过拟合[log](log.txt)
+A7: answer
+
+考虑减少大量数据的反复cp-paste，resort和sample时通过index操作和getitem
