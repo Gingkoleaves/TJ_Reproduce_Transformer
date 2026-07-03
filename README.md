@@ -1,21 +1,41 @@
 # Recurrence Transformer
 
-Reproduction of the Transformer model from ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762) (Vaswani et al., 2017) for WMT14 German→English machine translation.
+Reproduction of the Transformer model from ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762) (Vaswani et al., 2017) for WMT14 machine translation.
 
-Built on PyTorch's `nn.Transformer` with hand-rolled training infrastructure: BPE tokenizer, NoamOpt scheduler, beam search, and full WMT14 data pipeline.
+Two implementations live in this repo, on separate branches:
+
+- **`main`** — built on PyTorch's `nn.Transformer`, trained **DE→EN** (opposite of the paper's direction).
+- **`dev1`** (current) — fully hand-rolled encoder/decoder/attention (no `nn.Transformer`), trained **EN→DE**, matching the paper's reported task.
+
+Both share the hand-rolled training infrastructure: BPE tokenizer, NoamOpt scheduler, beam search, and full WMT14 data pipeline.
 
 ## Results
 
-Trained on a single RTX 5090 Laptop GPU (~30 hours, 80K/100K steps):(Mine are de-en, but paper is en-de)
+### `main` branch — DE→EN (single RTX 5090, ~30 hours, 80K/100K steps)
 
-| Decode | Samples | BLEU | Paper (base) |
+| Decode | Samples | BLEU | Paper (base, en-de) |
 |--------|---------|------|-------------|
 | Greedy | 3003 (full test) | 26.93 | — |
 | Beam-4 (α=0.6) | 3003 (full test) | **28.19** | **27.3** |
 
 BLEU breakdown (beam-4, full): `63.1/36.4/23.0/14.8  BP=0.948`
 
-Current pkt cost me 11 hours to train, and 1 houe to test in single NVIDIA GeForce RTX 5090.
+Note: this result isn't directly comparable to the paper's 27.3 — it's the easier DE→EN direction, not EN→DE.
+
+### `dev1` branch — EN→DE, hand-rolled model (single RTX 5090, ~11.5 hours, 92K/100K steps)
+
+Training was interrupted at step 92,100 (val_loss still improving, not fully converged — see below).
+
+| Decode | Samples | BLEU | Paper (base, en-de) |
+|--------|---------|------|-------------|
+| Beam-4 (α=0.6) | 3003 (full test) | **20.69** | **27.3** |
+
+BLEU breakdown (beam-4, full): `52.9/26.3/14.9/8.8  BP=1.000 ratio=1.019`
+
+Val loss trajectory (last 20K steps, still trending down when stopped):
+`74K: 3.38 → 78K: 3.34 → 82K: 3.31 → 86K: 3.28 → 90K: 3.26 → 92K: 3.257`
+
+This run is undertrained relative to the `main` branch result — stopped early, and on the harder EN→DE direction. Resuming to 100K steps (and beyond, since loss hadn't plateaued) should close most of the gap to the paper's 27.3.
 
 ## Project Structure
 
@@ -97,21 +117,21 @@ python -m Transformer_handmade.test --skip-unit --beam 4 --max-bleu-samples 0 --
 
 ```bash
 # Greedy decoding (~instant)
-bash Transformer_handmade/scripts/translate.sh "Die Katze sitzt auf der Matte."
+bash Transformer_handmade/scripts/translate.sh "The cat sits on the mat."
 
 # Beam search (beam=4, α=0.6)
-bash Transformer_handmade/scripts/translate.sh --beam "Die Katze sitzt auf der Matte."
+bash Transformer_handmade/scripts/translate.sh --beam "The cat sits on the mat."
 ```
 
 Or from Python:
 ```python
 from Transformer_handmade.inference import translate
 
-print(translate("Guten Morgen, wie geht es Ihnen?"))           # greedy
-print(translate("Guten Morgen, wie geht es Ihnen?", use_beam=True))  # beam-4
+print(translate("Good morning, how are you?"))           # greedy
+print(translate("Good morning, how are you?", use_beam=True))  # beam-4
 ```
 
-Input language is **German (DE)**, output is **English (EN)**.
+Input language is **English (EN)**, output is **German (DE)** (on `dev1`; `main` is reversed — DE→EN).
 
 ### Unit Tests
 
@@ -137,9 +157,8 @@ All hyperparameters in `Transformer_handmade/config.py`:
 | LR schedule | NoamOpt | ✓ |
 | Adam β₁, β₂, ε | 0.9, 0.98, 1e-9 | ✓ |
 | Label smoothing | 0.1 | ✓ |
-| Gradient clipping | 1.0 | ✓ |
 | **Data** | | |
-| Dataset | WMT14 DE-EN (~4.5M pairs) | ✓ |
+| Dataset | WMT14 EN-DE, `dev1`; DE-EN, `main` (~4.5M pairs) | ✓ |
 | Tokenizer | ByteLevel BPE, 37K vocab | ✓ |
 | Shared embeddings | src = tgt = output projection | ✓ |
 | **Inference** | | |
@@ -155,7 +174,7 @@ The paper used 8×P100 GPUs with an effective batch of ~25K tokens. Adaptations 
 | Effective batch | 512 (64×8 accum) | ~833 |
 | Precision | bfloat16 AMP | fp32 |
 | Hardware | 1×RTX 5090 (24 GB) | 8×P100 (16 GB each) |
-| Steps trained | 80K | 100K |
+| Steps trained | 80K (`main`) / 92K (`dev1`, interrupted) | 100K |
 
 ## Memory Requirements
 
@@ -174,10 +193,10 @@ grad_accum_steps = 4   # effective batch = 128
 
 ## Decode Methods
 
-| Method | Speed | BLEU | Notes |
-|--------|-------|------|-------|
-| Greedy | ~7 sent/s | 26.93 | Best token at each step |
-| Beam-4 | ~1.6 sent/s | 28.19 | Paper setting; keeps 4 candidates |
+| Method | Speed | BLEU (`main`, de-en) | BLEU (`dev1`, en-de) | Notes |
+|--------|-------|------|------|-------|
+| Greedy | ~7 sent/s | 26.93 | — | Best token at each step |
+| Beam-4 | ~1.5–1.6 sent/s | 28.19 | 20.69 | Paper setting; keeps 4 candidates |
 
 Beam search applies a **length penalty** to prevent bias toward short sequences:
 
