@@ -181,7 +181,6 @@ def train() -> Path:
 
             # Step only after accumulating enough gradients
             if batch_count % config.grad_accum_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.clip_grad_norm)
                 noam.step()
                 noam.zero_grad()
 
