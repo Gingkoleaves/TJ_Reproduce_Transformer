@@ -257,7 +257,7 @@ Q6: mask具体实现
 A6: 填入-inf在attn层中用softmax
 
 Q7: 过拟合[log](log.txt)
-A7: 调整初始化，增加layernorm【attn】
+A7: 调整初始化，增加layernorm【attn】；但是后面发现可能没有，因为在6w steps时下降了
 
 考虑减少大量数据的反复cp-paste，resort和sample时通过index操作和getitem
 与原实现的区别：原实现的batch是50000个token，其中src和tgt语言各占一半；我的实现是按512句子来的[每句平均30token],每个batch的样本量相对较少
