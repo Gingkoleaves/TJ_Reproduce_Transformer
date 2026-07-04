@@ -57,6 +57,43 @@ def load_checkpoint(
     return model, src_tokenizer, tgt_tokenizer, config, device
 
 
+def load_checkpoints(
+    checkpoint_paths: list[Path],
+) -> tuple[list[Seq2SeqTransformer], BPETokenizer, BPETokenizer, TransformerConfig, torch.device]:
+    """Load multiple checkpoints for logit-level ensemble decoding."""
+    if not checkpoint_paths:
+        raise ValueError("checkpoint_paths must not be empty")
+
+    models: list[Seq2SeqTransformer] = []
+    src_tokenizer: BPETokenizer | None = None
+    tgt_tokenizer: BPETokenizer | None = None
+    base_config: TransformerConfig | None = None
+    device: torch.device | None = None
+
+    for path in checkpoint_paths:
+        ckpt = torch.load(str(path), map_location="cpu", weights_only=False)
+        config_payload = ckpt.get("config", {})
+        config = TransformerConfig(**config_payload) if config_payload else get_config()
+        if base_config is None:
+            base_config = config
+            device = resolve_device(config.device)
+            tokenizer = BPETokenizer.load(config.tokenizer_path)
+            src_tokenizer = tokenizer
+            tgt_tokenizer = tokenizer
+        else:
+            if config.tokenizer_path != base_config.tokenizer_path:
+                print(f"[warn] tokenizer path differs for {path}; using {base_config.tokenizer_path}")
+
+        model = Seq2SeqTransformer(config, ckpt["src_vocab_size"], ckpt["tgt_vocab_size"]).to(device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.set_pad_ids(src_tokenizer.pad_id, tgt_tokenizer.pad_id)
+        model.eval()
+        models.append(model)
+
+    assert src_tokenizer is not None and tgt_tokenizer is not None and base_config is not None and device is not None
+    return models, src_tokenizer, tgt_tokenizer, base_config, device
+
+
 # ---------------------------------------------------------------------------
 # unit / smoke tests
 # ---------------------------------------------------------------------------
@@ -213,13 +250,130 @@ def test_shared_embeddings() -> None:
     print("[PASS] test_shared_embeddings")
 
 
+def _ensemble_step_logits(
+    models: list[Seq2SeqTransformer],
+    generated: torch.Tensor,
+    memories: list[torch.Tensor],
+    src_padding_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Average next-token logits across checkpoints for the current prefix."""
+    logits_sum = None
+    tgt_mask = models[0].generate_square_subsequent_mask(generated.size(1), generated.device)
+    tgt_padding_mask = generated.eq(models[0].tgt_pad_id)
+
+    for model, memory in zip(models, memories):
+        decoder_output = model.transformer.decoder(
+            model.embed_tgt(generated),
+            memory,
+            tgt_mask=tgt_mask,
+            tgt_key_padding_mask=tgt_padding_mask,
+            memory_key_padding_mask=src_padding_mask,
+        )
+        step_logits = model.generator(decoder_output[:, -1])
+        logits_sum = step_logits if logits_sum is None else logits_sum + step_logits
+
+    return logits_sum / len(models)
+
+
+@torch.no_grad()
+def ensemble_greedy_decode(
+    models: list[Seq2SeqTransformer],
+    src: torch.Tensor,
+    src_padding_mask: torch.Tensor,
+    bos_id: int,
+    eos_id: int,
+    max_len: int,
+) -> torch.Tensor:
+    memories = [m.transformer.encoder(m.embed_src(src), src_key_padding_mask=src_padding_mask) for m in models]
+    generated = torch.full((src.size(0), 1), bos_id, dtype=torch.long, device=src.device)
+
+    for _ in range(max_len - 1):
+        next_token_logits = _ensemble_step_logits(models, generated, memories, src_padding_mask)
+        next_token = next_token_logits.argmax(dim=-1, keepdim=True)
+        generated = torch.cat([generated, next_token], dim=1)
+        if torch.all(next_token.squeeze(1) == eos_id):
+            break
+
+    return generated
+
+
+@torch.no_grad()
+def ensemble_beam_search_decode(
+    models: list[Seq2SeqTransformer],
+    src: torch.Tensor,
+    src_padding_mask: torch.Tensor,
+    bos_id: int,
+    eos_id: int,
+    max_len: int,
+    beam_size: int = 4,
+    length_penalty: float = 0.6,
+) -> torch.Tensor:
+    assert src.size(0) == 1, "beam_search_decode expects batch_size=1"
+    device = src.device
+    memories = [m.transformer.encoder(m.embed_src(src), src_key_padding_mask=src_padding_mask) for m in models]
+
+    seqs = torch.full((1, 1), bos_id, dtype=torch.long, device=device)
+    scores = torch.zeros(1, dtype=torch.float, device=device)
+    completed: list[tuple[torch.Tensor, float]] = []
+
+    for _ in range(max_len - 1):
+        B, T = seqs.shape
+        expanded_src_mask = src_padding_mask.expand(B, -1)
+        expanded_memories = [memory.expand(B, -1, -1) for memory in memories]
+
+        logits = _ensemble_step_logits(models, seqs, expanded_memories, expanded_src_mask)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        topk_lp, topk_ids = torch.topk(log_probs, beam_size, dim=-1)
+
+        cand_scores = scores.unsqueeze(1) + topk_lp
+        lp = ((5.0 + T + 1) / 6.0) ** length_penalty
+        flat_normed = (cand_scores / lp).view(-1)
+        flat_scores = cand_scores.view(-1)
+        flat_ids = topk_ids.view(-1)
+        parents = torch.arange(B, device=device).unsqueeze(1).expand(-1, beam_size).reshape(-1)
+
+        top_k_idx = torch.topk(flat_normed, min(beam_size, flat_normed.numel())).indices
+
+        next_seqs: list[torch.Tensor] = []
+        next_scores: list[float] = []
+        for idx in top_k_idx.tolist():
+            p = parents[idx].item()
+            tok = flat_ids[idx].item()
+            sc = flat_scores[idx].item()
+            new_seq = torch.cat([seqs[p], seqs.new_tensor([tok])])
+            if tok == eos_id:
+                completed.append((new_seq, sc))
+            else:
+                next_seqs.append(new_seq)
+                next_scores.append(sc)
+
+        if not next_seqs:
+            break
+
+        seqs = torch.stack(next_seqs)
+        scores = seqs.new_tensor(next_scores, dtype=torch.float)
+    else:
+        for j in range(seqs.size(0)):
+            completed.append((seqs[j], scores[j].item()))
+
+    if not completed:
+        return seqs[0:1] if seqs.size(0) > 0 else seqs.new_full((1, 1), eos_id)
+
+    def _normed_score(c: tuple[torch.Tensor, float]) -> float:
+        seq, sc = c
+        return sc / ((5.0 + seq.size(0)) / 6.0) ** length_penalty
+
+    best_seq, _ = max(completed, key=_normed_score)
+    return best_seq.unsqueeze(0)
+
+
 # ---------------------------------------------------------------------------
 # BLEU evaluation
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def evaluate_bleu(
-    model: Seq2SeqTransformer,
+    model: Seq2SeqTransformer | list[Seq2SeqTransformer],
     dataset: TranslationDataset,
     src_tokenizer: BPETokenizer,
     tgt_tokenizer: BPETokenizer,
@@ -232,7 +386,12 @@ def evaluate_bleu(
 ) -> dict:
     """Run beam-search decoding on `dataset` and compute corpus BLEU via sacrebleu."""
     import time
-    model.eval()
+    ensemble = isinstance(model, list)
+    if ensemble:
+        for item in model:
+            item.eval()
+    else:
+        model.eval()
 
     hypotheses: list[str] = []
     references: list[str] = []
@@ -244,26 +403,49 @@ def evaluate_bleu(
     for i in range(total):
         sample = dataset[i]
         src = sample["src_ids"].unsqueeze(0).to(device)
-        src_mask = src.eq(model.src_pad_id)
+        src_ref = model[0] if ensemble else model
+        src_mask = src.eq(src_ref.src_pad_id)
 
         if beam_size > 1:
-            generated = model.beam_search_decode(
-                src=src,
-                src_padding_mask=src_mask,
-                bos_id=tgt_tokenizer.bos_id,
-                eos_id=tgt_tokenizer.eos_id,
-                max_len=max_len,
-                beam_size=beam_size,
-                length_penalty=length_penalty,
-            )
+            if ensemble:
+                generated = ensemble_beam_search_decode(
+                    model,
+                    src=src,
+                    src_padding_mask=src_mask,
+                    bos_id=tgt_tokenizer.bos_id,
+                    eos_id=tgt_tokenizer.eos_id,
+                    max_len=max_len,
+                    beam_size=beam_size,
+                    length_penalty=length_penalty,
+                )
+            else:
+                generated = model.beam_search_decode(
+                    src=src,
+                    src_padding_mask=src_mask,
+                    bos_id=tgt_tokenizer.bos_id,
+                    eos_id=tgt_tokenizer.eos_id,
+                    max_len=max_len,
+                    beam_size=beam_size,
+                    length_penalty=length_penalty,
+                )
         else:
-            generated = model.greedy_decode(
-                src=src,
-                src_padding_mask=src_mask,
-                bos_id=tgt_tokenizer.bos_id,
-                eos_id=tgt_tokenizer.eos_id,
-                max_len=max_len,
-            )
+            if ensemble:
+                generated = ensemble_greedy_decode(
+                    model,
+                    src=src,
+                    src_padding_mask=src_mask,
+                    bos_id=tgt_tokenizer.bos_id,
+                    eos_id=tgt_tokenizer.eos_id,
+                    max_len=max_len,
+                )
+            else:
+                generated = model.greedy_decode(
+                    src=src,
+                    src_padding_mask=src_mask,
+                    bos_id=tgt_tokenizer.bos_id,
+                    eos_id=tgt_tokenizer.eos_id,
+                    max_len=max_len,
+                )
         hyp = tgt_tokenizer.decode(generated[0].tolist())
         ref = sample["tgt_text"]
         src_text = src_tokenizer.decode(sample["src_ids"].tolist())
@@ -304,8 +486,9 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         type=Path,
+        action="append",
         default=None,
-        help="Path to checkpoint .pt file (default: config.checkpoint_path).",
+        help="Path to checkpoint .pt file. Repeat the flag to run logit-level ensemble (default: config.checkpoint_path).",
     )
     parser.add_argument(
         "--max-bleu-samples",
@@ -362,14 +545,26 @@ def main() -> None:
         print("=" * 50)
 
         base_config = get_config()
-        checkpoint_path = args.checkpoint or base_config.checkpoint_path
+        checkpoint_paths = args.checkpoint or [base_config.checkpoint_path]
+        if len(checkpoint_paths) == 1:
+            checkpoint_path = checkpoint_paths[0]
+        else:
+            checkpoint_path = None
 
-        if not checkpoint_path.exists():
-            print(f"[FAIL] checkpoint not found: {checkpoint_path}")
-            return
+        for checkpoint_path_item in checkpoint_paths:
+            if not checkpoint_path_item.exists():
+                print(f"[FAIL] checkpoint not found: {checkpoint_path_item}")
+                return
 
-        print(f"Loading checkpoint: {checkpoint_path}")
-        model, src_tok, tgt_tok, config, device = load_checkpoint(checkpoint_path)
+        if len(checkpoint_paths) == 1:
+            print(f"Loading checkpoint: {checkpoint_paths[0]}")
+            model, src_tok, tgt_tok, config, device = load_checkpoint(checkpoint_paths[0])
+        else:
+            print("Loading ensemble checkpoints:")
+            for checkpoint_path_item in checkpoint_paths:
+                print(f"  {checkpoint_path_item}")
+            model, src_tok, tgt_tok, config, device = load_checkpoints(checkpoint_paths)
+            print(f"  ensemble size: {len(model)}")
         print(f"  device:     {device}")
         print(f"  d_model:    {config.d_model}")
         print(f"  N layers:   {config.N}")
