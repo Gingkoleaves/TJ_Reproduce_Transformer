@@ -7,6 +7,7 @@ Key ingredients:
 - Full WMT14 DE-EN dataset (~4.5M pairs)
 """
 
+import argparse
 import warnings
 import random
 import os
@@ -22,7 +23,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from torch import nn
 
 from Transformer_handmade.config import get_config
-from Transformer_handmade.data import build_dataloaders
+from Transformer_handmade.data import build_dataloaders, BPETokenizer
 from Transformer_handmade.model import Seq2SeqTransformer, NoamOpt
 
 # TF32 gives free ~2× matmul throughput on Ampere/Ada/Blackwell vs FP32
@@ -78,6 +79,35 @@ def save_artifacts(
     )
 
 
+def save_avg_snapshot(
+    model: Seq2SeqTransformer,
+    step: int,
+    config,
+    src_vocab_size: int,
+    tgt_vocab_size: int,
+    keep: int,
+) -> None:
+    """Write a lightweight (no optimizer state) numbered snapshot for later
+    checkpoint averaging (paper §5.3: average the last N checkpoints), then
+    prune older snapshots beyond `keep`.
+    """
+    snap_dir = config.artifact_dir / "avg_ckpts"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "step": step,
+            "config": _serialize_config(config),
+            "src_vocab_size": src_vocab_size,
+            "tgt_vocab_size": tgt_vocab_size,
+        },
+        snap_dir / f"step_{step}.pt",
+    )
+    snapshots = sorted(snap_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
+    for stale in snapshots[:-keep]:
+        stale.unlink()
+
+
 @torch.no_grad()
 def evaluate(model, dataloader, criterion, device, use_amp: bool = False) -> float:
     model.eval()
@@ -111,21 +141,69 @@ def evaluate(model, dataloader, criterion, device, use_amp: bool = False) -> flo
 # main training loop
 # ---------------------------------------------------------------------------
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the hand-rolled Seq2Seq Transformer.")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume from config.checkpoint_path (model + optimizer + step), "
+             "reusing its saved tokenizer instead of re-fitting BPE.",
+    )
+    parser.add_argument(
+        "--steps", type=int, default=None,
+        help="Override config.steps (e.g. to keep training past the original "
+             "100K target when val_loss hasn't plateaued).",
+    )
+    parser.add_argument(
+        "--checkpoint-avg-every", type=int, default=1000,
+        help="Steps between rotating snapshots kept for checkpoint averaging (0 disables).",
+    )
+    parser.add_argument(
+        "--checkpoint-avg-keep", type=int, default=5,
+        help="Number of most-recent snapshots to retain for averaging (paper §5.3 uses 5).",
+    )
+    parser.add_argument(
+        "--max-tokens-per-batch", type=int, default=None,
+        help="Override config.max_tokens_per_batch (per-microbatch token budget).",
+    )
+    parser.add_argument(
+        "--grad-accum-steps", type=int, default=None,
+        help="Override config.grad_accum_steps.",
+    )
+    return parser.parse_args()
+
+
 def train() -> Path:
+    args = parse_args()
     config = get_config()
+    if args.steps is not None:
+        config.steps = args.steps
+    if args.max_tokens_per_batch is not None:
+        config.max_tokens_per_batch = args.max_tokens_per_batch
+    if args.grad_accum_steps is not None:
+        config.grad_accum_steps = args.grad_accum_steps
     set_seed(config.seed)
     device = resolve_device(config.device)
     config.artifact_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"device: {device}")
     print(f"d_model: {config.d_model}  N: {config.N}  h: {config.h}  d_ff: {config.d_ff}")
-    print(f"batch_size: {config.batch_size}  grad_accum: {config.grad_accum_steps}"
-          f"  effective: {config.effective_batch_size}")
+    print(f"max_tokens_per_batch: {config.max_tokens_per_batch}  grad_accum: {config.grad_accum_steps}"
+          f"  effective_tokens/step: {config.effective_tokens_per_step}")
     print(f"warmup_steps: {config.warmup_steps}  total_steps: {config.steps}")
     print(f"vocab_size: {config.vocab_size}")
     print(f"AMP: {config.use_amp} (bfloat16)")
 
-    loaders, src_tokenizer, tgt_tokenizer = build_dataloaders(config)
+    resume_ckpt = None
+    reuse_tokenizer = None
+    if args.resume:
+        if not config.checkpoint_path.exists():
+            raise FileNotFoundError(f"--resume given but no checkpoint at {config.checkpoint_path}")
+        resume_ckpt = torch.load(config.checkpoint_path, map_location="cpu", weights_only=False)
+        reuse_tokenizer = BPETokenizer.load(config.tokenizer_path)
+        print(f"Resuming from step {resume_ckpt['step']} "
+              f"(checkpoint: {config.checkpoint_path}, tokenizer: {config.tokenizer_path})")
+
+    loaders, src_tokenizer, tgt_tokenizer = build_dataloaders(config, tokenizer=reuse_tokenizer)
     model = Seq2SeqTransformer(config, src_tokenizer.vocab_size, tgt_tokenizer.vocab_size).to(device)
     model.set_pad_ids(src_tokenizer.pad_id, tgt_tokenizer.pad_id)
 
@@ -145,9 +223,17 @@ def train() -> Path:
         label_smoothing=config.label_smoothing,
     )
 
-    src_tokenizer.save(config.tokenizer_path)   # shared vocab → one file
-
     optimizer_step = 0
+    if resume_ckpt is not None:
+        model.load_state_dict(resume_ckpt["model_state_dict"])
+        noam.load_state_dict(resume_ckpt["optimizer_state_dict"])
+        optimizer_step = resume_ckpt["step"]
+        if optimizer_step >= config.steps:
+            print(f"Checkpoint already at step {optimizer_step} >= target {config.steps}; nothing to do.")
+            return config.checkpoint_path
+    else:
+        src_tokenizer.save(config.tokenizer_path)   # shared vocab → one file
+
     batch_count = 0
     accum_loss = 0.0
 
@@ -200,6 +286,13 @@ def train() -> Path:
                         src_tokenizer.vocab_size, tgt_tokenizer.vocab_size,
                     )
 
+                if args.checkpoint_avg_every and optimizer_step % args.checkpoint_avg_every == 0:
+                    save_avg_snapshot(
+                        model, optimizer_step, config,
+                        src_tokenizer.vocab_size, tgt_tokenizer.vocab_size,
+                        keep=args.checkpoint_avg_keep,
+                    )
+
                 if optimizer_step >= config.steps:
                     break
 
@@ -207,6 +300,12 @@ def train() -> Path:
         model, noam, optimizer_step, config,
         src_tokenizer.vocab_size, tgt_tokenizer.vocab_size,
     )
+    if args.checkpoint_avg_every:
+        save_avg_snapshot(
+            model, optimizer_step, config,
+            src_tokenizer.vocab_size, tgt_tokenizer.vocab_size,
+            keep=args.checkpoint_avg_keep,
+        )
     print(f"checkpoint saved to {config.checkpoint_path}")
     return config.checkpoint_path
 

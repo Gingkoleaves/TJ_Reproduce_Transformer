@@ -22,9 +22,11 @@ BLEU breakdown (beam-4, full): `63.1/36.4/23.0/14.8  BP=0.948`
 
 Note: this result isn't directly comparable to the paper's 27.3 — it's the easier DE→EN direction, not EN→DE.
 
-### `dev1` branch — EN→DE, hand-rolled model (single RTX 5090, ~11.5 hours, 92K/100K steps)
+### `dev1` branch — EN→DE, hand-rolled model
 
-Training was interrupted at step 92,100 (val_loss still improving, not fully converged — see below).
+#### Run 1 — sentence-count batching (single RTX 5090, ~11.5 hours, 92K/100K steps)
+
+Fixed-size batches of 64 sentences × 8 grad-accum (effective batch 512 sentences). Training was interrupted at step 92,100 (val_loss still improving, not fully converged — see below).
 
 | Decode | Samples | BLEU | Paper (base, en-de) |
 |--------|---------|------|-------------|
@@ -35,7 +37,17 @@ BLEU breakdown (beam-4, full): `52.9/26.3/14.9/8.8  BP=1.000 ratio=1.019`
 Val loss trajectory (last 20K steps, still trending down when stopped):
 `74K: 3.38 → 78K: 3.34 → 82K: 3.31 → 86K: 3.28 → 90K: 3.26 → 92K: 3.257`
 
-This run is undertrained relative to the `main` branch result — stopped early, and on the harder EN→DE direction. Resuming to 100K steps (and beyond, since loss hadn't plateaued) should close most of the gap to the paper's 27.3.
+#### Run 2 — token-budget batching, paper-scale batches (single RTX 5090, ~9.7 hours, 100K/100K steps) ⭐ current
+
+Retrained from scratch (2026-07-03 → 07-04) after switching the dataloader to **token-budget batching**: `max_tokens_per_batch=12000 × grad_accum=2 = 24K tokens/step`, matching the paper's ~25K-token effective batch. Final `val_loss = 3.016`.
+
+| Decode | Samples | BLEU | Paper (base, en-de) |
+|--------|---------|------|-------------|
+| Beam-4 (α=0.6) | 3003 (full test) | **24.26** | **27.3** |
+
+BLEU breakdown (beam-4, full): `55.9/29.8/18.0/11.5  BP=1.000 ratio=1.016`
+
+**Run 2 vs Run 1: +3.57 BLEU (20.69 → 24.26), val_loss 3.257 → 3.016, and ~2 hours *less* wall-clock time.** The only substantive change is the batching strategy: length-bucketed token-budget batches waste far fewer pad tokens per step and deliver the paper's effective batch size, so each step is both cheaper and more informative. This closes most of the gap to the paper's 27.3; the remainder is consistent with the paper's use of checkpoint averaging and a multi-GPU setup.
 
 ## Project Structure
 
@@ -171,10 +183,10 @@ The paper used 8×P100 GPUs with an effective batch of ~25K tokens. Adaptations 
 
 | Setting | This repo | Paper |
 |---------|-----------|-------|
-| Effective batch | 512 (64×8 accum) | ~833 |
+| Effective batch | 512 sentences (run 1) → **24K tokens** (12K×2 accum, run 2) | ~25K tokens |
 | Precision | bfloat16 AMP | fp32 |
 | Hardware | 1×RTX 5090 (24 GB) | 8×P100 (16 GB each) |
-| Steps trained | 80K (`main`) / 92K (`dev1`, interrupted) | 100K |
+| Steps trained | 80K (`main`) / 100K (`dev1` run 2) | 100K |
 
 ## Memory Requirements
 
@@ -196,7 +208,7 @@ grad_accum_steps = 4   # effective batch = 128
 | Method | Speed | BLEU (`main`, de-en) | BLEU (`dev1`, en-de) | Notes |
 |--------|-------|------|------|-------|
 | Greedy | ~7 sent/s | 26.93 | — | Best token at each step |
-| Beam-4 | ~1.5–1.6 sent/s | 28.19 | 20.69 | Paper setting; keeps 4 candidates |
+| Beam-4 | ~1.4–1.6 sent/s | 28.19 | 24.26 | Paper setting; keeps 4 candidates |
 
 Beam search applies a **length penalty** to prevent bias toward short sequences:
 

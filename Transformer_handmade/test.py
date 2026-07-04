@@ -66,7 +66,7 @@ def load_checkpoint(
 
 def test_positional_encoding() -> None:
     """PositionalEncoding: shape, device persistence, value sanity."""
-    from Transformer_handmade.model.transformer import PositionalEncoding
+    from Transformer_handmade.model.embedding import PositionalEncoding
 
     d_model, max_len, dropout = 64, 32, 0.0
     pe = PositionalEncoding(d_model, dropout, max_len)

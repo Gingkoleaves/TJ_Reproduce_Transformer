@@ -261,3 +261,11 @@ A7: 调整初始化，增加layernorm【attn】；但是后面发现可能没有
 
 考虑减少大量数据的反复cp-paste，resort和sample时通过index操作和getitem
 与原实现的区别：原实现的batch是50000个token，其中src和tgt语言各占一半；我的实现是按512句子来的[每句平均30token],每个batch的样本量相对较少
+
+## problem2
+
+效果不够好！
+
+改进：
+原本dataloader实现有偏差：每次硬性load 64句，但是没有考虑每个句子的token数量；修改为从短到长加入batch直到一个batch的内容超过指定token数量；对这样的batch再进行collate加pad进入model
+此外，加入根据ckpt继续训练的功能，加入不断更新ckpt来用后5个ckpt求平均的方式测试BLEU，扩大gradient_accum的规模逼近原论文单个batch

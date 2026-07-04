@@ -1,8 +1,11 @@
 """Data loading for WMT14 DE-EN translation.
 
-Includes length-grouped batching (§5.1 of the paper):
-sentences are sorted by source length so each batch contains sequences
-of similar length, minimizing wasted padding computation.
+Includes token-budget batching (§5.1 of the paper): "each training batch
+contained a set of sentence pairs containing approximately 25000 source
+tokens and 25000 target tokens" — sentences are sorted by length and packed
+into batches up to a token budget, rather than a fixed sentence count, so
+padding waste stays low and batch cost stays roughly constant regardless of
+sentence length.
 """
 
 import csv
@@ -92,50 +95,58 @@ class TranslationDataset(Dataset):
         self.src_tokenizer = src_tokenizer
         self.tgt_tokenizer = tgt_tokenizer
         self.max_seq_len = max_seq_len
-        self.src_lengths = self._load_or_build_lengths(
-            records, src_tokenizer, max_seq_len, length_cache_path,
+        self.src_lengths, self.tgt_lengths = self._load_or_build_lengths(
+            records, src_tokenizer, tgt_tokenizer, max_seq_len, length_cache_path,
         )
 
     @staticmethod
     def _load_or_build_lengths(
         records: list[dict[str, str]],
-        tokenizer: BPETokenizer,
+        src_tokenizer: BPETokenizer,
+        tgt_tokenizer: BPETokenizer,
         max_seq_len: int,
         cache_path: str | Path | None,
-    ) -> list[int]:
+    ) -> tuple[list[int], list[int]]:
         total = len(records)
 
-        # Try cache first — keyed by record count + tokenizer vocab size
+        # Try cache first — keyed by record count + tokenizer vocab sizes.
+        # (Older caches used a different key/value schema and a single
+        # "lengths" list; they simply miss here and get recomputed once.)
         if cache_path is not None:
             cache_path = Path(cache_path)
             cache_key = {
                 "n_records": total,
                 "max_seq_len": max_seq_len,
-                "vocab_size": tokenizer.vocab_size,
+                "src_vocab_size": src_tokenizer.vocab_size,
+                "tgt_vocab_size": tgt_tokenizer.vocab_size,
             }
             if cache_path.exists():
                 cached = torch.load(cache_path, map_location="cpu", weights_only=False)
                 if cached.get("key") == cache_key:
                     print(f"  lengths cache hit ({cache_path})")
-                    return cached["lengths"]
+                    return cached["src_lengths"], cached["tgt_lengths"]
                 else:
                     print(f"  lengths cache stale, recomputing …")
 
         # Compute lengths
-        print(f"  pre-computing lengths for {total} records …")
-        lengths: list[int] = []
+        print(f"  pre-computing src/tgt lengths for {total} records …")
+        src_lengths: list[int] = []
+        tgt_lengths: list[int] = []
         for i, rec in enumerate(records):
-            tok_len = min(len(tokenizer.encode(rec["src"])), max_seq_len)
-            lengths.append(tok_len)
+            src_lengths.append(min(len(src_tokenizer.encode(rec["src"])), max_seq_len))
+            tgt_lengths.append(min(len(tgt_tokenizer.encode(rec["tgt"])), max_seq_len))
             if (i + 1) % 500_000 == 0 or i == total - 1:
                 print(f"  … {i+1}/{total}")
 
         # Persist
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"key": cache_key, "lengths": lengths}, cache_path)
+            torch.save(
+                {"key": cache_key, "src_lengths": src_lengths, "tgt_lengths": tgt_lengths},
+                cache_path,
+            )
 
-        return lengths
+        return src_lengths, tgt_lengths
 
     def __len__(self) -> int:
         return len(self.records)
@@ -198,6 +209,56 @@ class LengthGroupedBatchSampler(Sampler[list[int]]):
         return (len(self.lengths) + self.batch_size - 1) // self.batch_size
 
 
+class TokenBudgetBatchSampler(Sampler[list[int]]):
+    """Pack sentence pairs into batches by token budget (paper §5.1): "each
+    training batch contained a set of sentence pairs containing approximately
+    25000 source tokens and 25000 target tokens" — not a fixed sentence count.
+
+    Sentences are sorted by cost = max(src_len, tgt_len) so within-batch
+    padding stays minimal, then greedily packed so
+    len(batch) * running_max_cost <= max_tokens. Batch *order* is shuffled
+    per epoch; batch *contents* stay length-sorted.
+    """
+
+    def __init__(
+        self,
+        src_lengths: list[int],
+        tgt_lengths: list[int],
+        max_tokens: int,
+        shuffle: bool = True,
+    ) -> None:
+        assert len(src_lengths) == len(tgt_lengths)
+        self.costs = [max(s, t) for s, t in zip(src_lengths, tgt_lengths)]
+        self.max_tokens = max_tokens
+        self.shuffle = shuffle
+        self._sorted_indices = sorted(range(len(self.costs)), key=lambda i: self.costs[i])
+        self._num_batches = sum(1 for _ in self._pack(self._sorted_indices))
+
+    def _pack(self, indices: list[int]) -> Iterator[list[int]]:
+        batch: list[int] = []
+        batch_max = 0
+        for idx in indices:
+            cand_max = max(batch_max, self.costs[idx])
+            if batch and (len(batch) + 1) * cand_max > self.max_tokens:
+                yield batch
+                batch = [idx]
+                batch_max = self.costs[idx]
+            else:
+                batch.append(idx)
+                batch_max = cand_max
+        if batch:
+            yield batch
+
+    def __iter__(self) -> Iterator[list[int]]:
+        batches = list(self._pack(self._sorted_indices))
+        if self.shuffle:
+            random.shuffle(batches)
+        yield from batches
+
+    def __len__(self) -> int:
+        return self._num_batches
+
+
 # ---------------------------------------------------------------------------
 # Collation
 # ---------------------------------------------------------------------------
@@ -257,12 +318,19 @@ def _build_tokenizers(
 
 def build_dataloaders(
     config: TransformerConfig,
+    tokenizer: BPETokenizer | None = None,
 ) -> tuple[dict[str, DataLoader], BPETokenizer, BPETokenizer]:
     train_records = load_parallel_records(config, config.train_split, config.train_samples)
     valid_records = load_parallel_records(config, config.valid_split, config.valid_samples)
     test_records = load_parallel_records(config, config.test_split, config.test_samples)
 
-    src_tokenizer, tgt_tokenizer = _build_tokenizers(config, train_records)
+    if tokenizer is not None:
+        # Reuse an existing (e.g. checkpointed) tokenizer instead of re-fitting BPE —
+        # required when resuming training so token ids stay consistent with the
+        # loaded model's embedding table.
+        src_tokenizer, tgt_tokenizer = tokenizer, tokenizer
+    else:
+        src_tokenizer, tgt_tokenizer = _build_tokenizers(config, train_records)
     collate_fn = build_collate_fn(src_tokenizer.pad_id)
 
     datasets = {
@@ -280,10 +348,11 @@ def build_dataloaders(
         ),
     }
 
-    # Training: length-grouped batching (paper §5.1)
-    train_sampler = LengthGroupedBatchSampler(
+    # Training: token-budget batching (paper §5.1 — ~25000 src/tgt tokens/batch)
+    train_sampler = TokenBudgetBatchSampler(
         datasets["train"].src_lengths,
-        batch_size=config.batch_size,
+        datasets["train"].tgt_lengths,
+        max_tokens=config.max_tokens_per_batch,
         shuffle=True,
     )
 

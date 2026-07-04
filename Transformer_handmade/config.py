@@ -16,13 +16,16 @@ class TransformerConfig:
 
     # ====== Optimization (matches paper §5.3) ======
     steps: int = 100_000        # paper: 100K steps on 8×P100
-    batch_size: int = 64        # per-GPU batch; effective = batch_size * grad_accum_steps
+    batch_size: int = 64        # fixed-size batches: validation/test loaders only
+    max_tokens_per_batch: int = 12_000  # paper §5.1: ~25000 src + ~25000 tgt tokens/batch;
+                                        # this is the per-microbatch budget (GPU-memory limited),
+                                        # multiplied by grad_accum_steps to reach the paper's target
     warmup_steps: int = 4_000   # paper: 4000 warmup steps
     label_smoothing: float = 0.1
     adam_beta1: float = 0.9
     adam_beta2: float = 0.98
     adam_eps: float = 1e-9
-    grad_accum_steps: int = 8   # effective batch = 512 (paper ~833, relaxed for single GPU)
+    grad_accum_steps: int = 2   # effective ~24000 tokens/step (paper ~25000), single GPU
 
     # ====== AMP (bfloat16 — no scaler needed, stable on RTX 5090) ======
     use_amp: bool = True
@@ -78,6 +81,10 @@ class TransformerConfig:
     @property
     def effective_batch_size(self) -> int:
         return self.batch_size * self.grad_accum_steps
+
+    @property
+    def effective_tokens_per_step(self) -> int:
+        return self.max_tokens_per_batch * self.grad_accum_steps
 
 
 def get_config() -> TransformerConfig:
