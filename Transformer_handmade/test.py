@@ -60,6 +60,31 @@ def load_checkpoint(
     return model, src_tokenizer, tgt_tokenizer, config, device
 
 
+def resolve_avg_checkpoint(config: TransformerConfig, n: int) -> Path:
+    """Return the averaged checkpoint, rebuilding it if missing or older than the
+    newest snapshot in artifacts/avg_ckpts (paper §5.3: average last 5 checkpoints)."""
+    from Transformer_handmade.average_checkpoints import average_checkpoints
+
+    snapshot_dir = config.artifact_dir / "avg_ckpts"
+    avg_path = config.artifact_dir / "pytorch_transformer_avg.pt"
+
+    snapshots = sorted(snapshot_dir.glob("step_*.pt"), key=lambda p: p.stat().st_mtime)
+    if not snapshots:
+        if avg_path.exists():
+            print(f"[warn] no snapshots in {snapshot_dir}; using existing {avg_path}")
+            return avg_path
+        raise FileNotFoundError(
+            f"No snapshots in {snapshot_dir} and no averaged checkpoint at {avg_path}. "
+            "Train with --checkpoint-avg-every to produce snapshots first."
+        )
+
+    if avg_path.exists() and avg_path.stat().st_mtime >= snapshots[-1].stat().st_mtime:
+        print(f"Averaged checkpoint is up to date: {avg_path}")
+        return avg_path
+
+    return average_checkpoints(snapshot_dir, n, avg_path)
+
+
 # ---------------------------------------------------------------------------
 # unit / smoke tests
 # ---------------------------------------------------------------------------
@@ -311,6 +336,18 @@ def main() -> None:
         help="Path to checkpoint .pt file (default: config.checkpoint_path).",
     )
     parser.add_argument(
+        "--avg",
+        action="store_true",
+        help="Evaluate the checkpoint averaged from the last snapshots (paper §5.3). "
+        "Rebuilds artifacts/pytorch_transformer_avg.pt if missing or stale.",
+    )
+    parser.add_argument(
+        "--avg-n",
+        type=int,
+        default=5,
+        help="Number of most-recent snapshots to average when --avg is set (default: 5).",
+    )
+    parser.add_argument(
         "--max-bleu-samples",
         type=int,
         default=256,
@@ -365,7 +402,12 @@ def main() -> None:
         print("=" * 50)
 
         base_config = get_config()
-        checkpoint_path = args.checkpoint or base_config.checkpoint_path
+        if args.avg:
+            if args.checkpoint is not None:
+                print("[warn] --avg overrides --checkpoint; using averaged checkpoint")
+            checkpoint_path = resolve_avg_checkpoint(base_config, args.avg_n)
+        else:
+            checkpoint_path = args.checkpoint or base_config.checkpoint_path
 
         if not checkpoint_path.exists():
             print(f"[FAIL] checkpoint not found: {checkpoint_path}")

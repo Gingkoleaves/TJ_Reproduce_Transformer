@@ -20,18 +20,12 @@ import torch
 from Transformer_handmade.config import get_config
 
 
-def main() -> None:
-    config = get_config()
-    parser = argparse.ArgumentParser(description="Average the last N checkpoint snapshots.")
-    parser.add_argument("--snapshot-dir", type=Path, default=config.artifact_dir / "avg_ckpts")
-    parser.add_argument("--n", type=int, default=5, help="Number of most-recent snapshots to average.")
-    parser.add_argument("--output", type=Path, default=config.artifact_dir / "pytorch_transformer_avg.pt")
-    args = parser.parse_args()
-
-    snapshots = sorted(args.snapshot_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
+def average_checkpoints(snapshot_dir: Path, n: int, output: Path) -> Path:
+    """Average the last `n` snapshots in `snapshot_dir` and save to `output`."""
+    snapshots = sorted(snapshot_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
     if not snapshots:
-        raise FileNotFoundError(f"No snapshots found in {args.snapshot_dir}")
-    snapshots = snapshots[-args.n:]
+        raise FileNotFoundError(f"No snapshots found in {snapshot_dir}")
+    snapshots = snapshots[-n:]
     print(f"Averaging {len(snapshots)} snapshots:")
     for p in snapshots:
         print(f"  {p}")
@@ -61,9 +55,21 @@ def main() -> None:
             "tgt_vocab_size": ref_ckpt["tgt_vocab_size"],
             "averaged_from_steps": [int(p.stem.split("_")[1]) for p in snapshots],
         },
-        args.output,
+        output,
     )
-    print(f"Averaged checkpoint saved to {args.output}")
+    print(f"Averaged checkpoint saved to {output}")
+    return output
+
+
+def main() -> None:
+    config = get_config()
+    parser = argparse.ArgumentParser(description="Average the last N checkpoint snapshots.")
+    parser.add_argument("--snapshot-dir", type=Path, default=config.artifact_dir / "avg_ckpts")
+    parser.add_argument("--n", type=int, default=5, help="Number of most-recent snapshots to average.")
+    parser.add_argument("--output", type=Path, default=config.artifact_dir / "pytorch_transformer_avg.pt")
+    args = parser.parse_args()
+
+    average_checkpoints(args.snapshot_dir, args.n, args.output)
 
 
 if __name__ == "__main__":

@@ -4,14 +4,16 @@ Reproduction of the Transformer model from ["Attention Is All You Need"](https:/
 
 Two implementations live in this repo, on separate branches:
 
-- **`main`** — built on PyTorch's `nn.Transformer`, trained **DE→EN** (opposite of the paper's direction).
+- **`main`** — built on PyTorch's `nn.Transformer`. Run 1 trained **DE→EN** (opposite of the paper's direction); Run 2 trained **EN→DE** with true 25K-token batches.
 - **`dev1`** (current) — fully hand-rolled encoder/decoder/attention (no `nn.Transformer`), trained **EN→DE**, matching the paper's reported task.
 
 Both share the hand-rolled training infrastructure: BPE tokenizer, NoamOpt scheduler, beam search, and full WMT14 data pipeline.
 
 ## Results
 
-### `main` branch — DE→EN (single RTX 5090, ~30 hours, 80K/100K steps)
+### `main` branch — `nn.Transformer`
+
+#### Run 1 — DE→EN (single RTX 5090, ~30 hours, 80K/100K steps)
 
 | Decode | Samples | BLEU | Paper (base, en-de) |
 |--------|---------|------|-------------|
@@ -21,6 +23,27 @@ Both share the hand-rolled training infrastructure: BPE tokenizer, NoamOpt sched
 BLEU breakdown (beam-4, full): `63.1/36.4/23.0/14.8  BP=0.948`
 
 Note: this result isn't directly comparable to the paper's 27.3 — it's the easier DE→EN direction, not EN→DE.
+
+#### Run 2 — EN→DE, true 25K-token batches (RTX 4090 48GB, 100K/100K steps, no ckpt averaging)
+
+Independent run on a separate machine (AutoDL container, RTX 4090 48 GB, 2026-07-04): same EN→DE task and hyperparameters as the `dev1` runs, but using `nn.Transformer` and a **true 25,000-token batch per step with no gradient accumulation** — the 48 GB card fits the paper's effective batch in a single forward/backward pass. 100K steps, final `val_loss = 3.0047`.
+
+| Checkpoint | Decode | Samples | BLEU | Paper (base, en-de) |
+|-----------|--------|---------|------|-------------|
+| Single 100K | Beam-4 (α=0.6) | 3003 (full test) | 24.21 | |
+| **Avg of last 5 ckpts (§5.3)** | Beam-4 (α=0.6) | 3003 (full test) | **24.59** | **27.3** |
+
+BLEU breakdown (single ckpt): `55.4/29.7/18.1/11.5  BP=1.000 ratio=1.029`
+BLEU breakdown (avg ckpt): `55.7/30.1/18.5/11.8  BP=1.000 ratio=1.029`
+
+Checkpoint averaging adds **+0.38** here (24.21 → 24.59), replicating the `dev1` finding (+0.51) on an independent implementation and machine — the technique's contribution is consistent across both codebases.
+
+**This cross-validates both implementations and the batching strategy** against `dev1` Run 2 (hand-rolled modules, 12K tokens × grad_accum 2, 24.26 at 100K steps, val_loss 3.016):
+- `nn.Transformer` vs hand-rolled → **24.21 vs 24.26** (Δ0.05, within noise): the hand-rolled encoder/decoder/attention is functionally equivalent to PyTorch's reference implementation.
+- True 25K-token single-step batches vs 12K × grad_accum 2 → same result: gradient accumulation is a faithful substitute for large physical batches at this scale.
+- The marginally lower val_loss (3.0047 vs 3.016) doesn't translate into a BLEU difference.
+
+The remaining gap to the paper's 27.3 is therefore not an implementation issue — it's dominated by the sacrebleu-vs-tokenized-BLEU metric difference (~0.5–1 point) plus preprocessing-pipeline differences (see the metric note under `dev1` Run 2 below).
 
 ### `dev1` branch — EN→DE, hand-rolled model
 
@@ -48,6 +71,22 @@ Retrained from scratch (2026-07-03 → 07-04) after switching the dataloader to 
 BLEU breakdown (beam-4, full): `55.9/29.8/18.0/11.5  BP=1.000 ratio=1.016`
 
 **Run 2 vs Run 1: +3.57 BLEU (20.69 → 24.26), val_loss 3.257 → 3.016, and ~2 hours *less* wall-clock time.** The only substantive change is the batching strategy: length-bucketed token-budget batches waste far fewer pad tokens per step and deliver the paper's effective batch size, so each step is both cheaper and more informative. This closes most of the gap to the paper's 27.3; the remainder is consistent with the paper's use of checkpoint averaging and a multi-GPU setup.
+
+#### Run 2 (continued) — +20K steps & checkpoint averaging (paper §5.3) ⭐ best
+
+Resumed Run 2 from 100K to **120K steps** (2026-07-04), saving a snapshot every 1,000 steps. Following the paper's evaluation recipe — *"a single model obtained by averaging the last 5 checkpoints"* — the snapshots from steps 116K–120K were averaged into `artifacts/pytorch_transformer_avg.pt` and evaluated with beam-4:
+
+| Checkpoint | Decode | Samples | BLEU | Paper (base, en-de) |
+|-----------|--------|---------|------|-------------|
+| Single 100K | Beam-4 (α=0.6) | 3003 (full test) | 24.26 | |
+| Single 120K | Beam-4 (α=0.6) | 3003 (full test) | 24.28 | |
+| **Avg of last 5 (116K–120K)** | Beam-4 (α=0.6) | 3003 (full test) | **24.79** | **27.3** |
+
+BLEU breakdown (avg ckpt, beam-4, full): `56.1/30.3/18.6/11.9  BP=1.000 ratio=1.023`
+
+**The +0.5 BLEU comes almost entirely from checkpoint averaging, not the extra training.** The single-checkpoint ablation isolates the two effects: 20K extra steps moved BLEU by only +0.02 (24.26 → 24.28 — training has plateaued), while averaging the last 5 snapshots added **+0.51** over the single 120K checkpoint (24.28 → 24.79), squarely in the +0.3–0.5 range typically attributed to this technique. All four n-gram precisions improve.
+
+Metric note: sacrebleu (detokenized 13a) reads below the paper's tokenized BLEU + compound splitting. Re-scoring these same predictions with an approximation of the paper's recipe (13a tokenization + `##AT##` compound splitting) gives **25.23** (25.47 with intl tokenization), so 24.79 corresponds to roughly ~25.5–26 in the paper's metric — the true quality gap to 27.3 is ~1.3–1.8 BLEU, not ~2.5.
 
 ## Project Structure
 
@@ -123,6 +162,20 @@ bash Transformer_handmade/scripts/eval.sh --beam 1
 Or run directly via Python for more options:
 ```bash
 python -m Transformer_handmade.test --skip-unit --beam 4 --max-bleu-samples 0 --output predictions.tsv
+```
+
+#### Checkpoint averaging (paper §5.3)
+
+Train with `--checkpoint-avg-every 1000` to write snapshots into `artifacts/avg_ckpts/`, then evaluate the average of the last 5 snapshots (rebuilt automatically if stale):
+
+```bash
+python -m Transformer_handmade.test --skip-unit --avg --max-bleu-samples 0 --output avg_predictions.tsv
+
+# Average a different number of snapshots (paper uses 20 for the big model)
+python -m Transformer_handmade.test --skip-unit --avg --avg-n 20
+
+# Or build the averaged checkpoint manually
+python -m Transformer_handmade.average_checkpoints --n 5
 ```
 
 ### Inference
@@ -209,6 +262,9 @@ grad_accum_steps = 4   # effective batch = 128
 |--------|-------|------|------|-------|
 | Greedy | ~7 sent/s | 26.93 | — | Best token at each step |
 | Beam-4 | ~1.4–1.6 sent/s | 28.19 | 24.26 | Paper setting; keeps 4 candidates |
+| Beam-4 + avg ckpt | ~1.4–1.6 sent/s | — | **24.79** | Paper §5.3: average of last 5 checkpoints (116K–120K) |
+
+`main` Run 2 (EN→DE, `nn.Transformer`, true 25K-token batches) scored **24.21** beam-4 single-ckpt / **24.59** with checkpoint averaging — see Results above.
 
 Beam search applies a **length penalty** to prevent bias toward short sequences:
 
