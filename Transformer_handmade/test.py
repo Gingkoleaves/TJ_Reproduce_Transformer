@@ -11,6 +11,7 @@ from pathlib import Path
 import sacrebleu
 import torch
 
+from Transformer_handmade.average_checkpoints import average_checkpoints
 from Transformer_handmade.config import TransformerConfig, get_config
 from Transformer_handmade.data import (
     BPETokenizer,
@@ -55,6 +56,24 @@ def load_checkpoint(
     model.set_pad_ids(src_tokenizer.pad_id, tgt_tokenizer.pad_id)
     model.eval()
     return model, src_tokenizer, tgt_tokenizer, config, device
+
+
+def is_avg_checkpoint_stale(avg_path: Path, snapshot_dir: Path, n: int) -> bool:
+    if not avg_path.exists():
+        return True
+
+    snapshots = sorted(snapshot_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
+    if not snapshots:
+        return True
+
+    newest_snapshot_mtime = max(path.stat().st_mtime for path in snapshots[-n:])
+    return avg_path.stat().st_mtime < newest_snapshot_mtime
+
+
+def load_avg_checkpoint(
+    avg_path: Path,
+) -> tuple[Seq2SeqTransformer, BPETokenizer, BPETokenizer, TransformerConfig, torch.device]:
+    return load_checkpoint(avg_path)
 
 
 def load_checkpoints(
@@ -518,6 +537,17 @@ def main() -> None:
         default=None,
         help="Path to save predictions as TSV (columns: SRC, HYP, REF).",
     )
+    parser.add_argument(
+        "--avg",
+        action="store_true",
+        help="Use the averaged checkpoint from the last N snapshots.",
+    )
+    parser.add_argument(
+        "--avg-n",
+        type=int,
+        default=5,
+        help="Number of latest snapshots to average when --avg is set.",
+    )
     args = parser.parse_args()
 
     # ---- unit tests ----
@@ -558,7 +588,16 @@ def main() -> None:
 
         if len(checkpoint_paths) == 1:
             print(f"Loading checkpoint: {checkpoint_paths[0]}")
-            model, src_tok, tgt_tok, config, device = load_checkpoint(checkpoint_paths[0])
+            if args.avg:
+                avg_path = base_config.artifact_dir / "pytorch_transformer_avg.pt"
+                if is_avg_checkpoint_stale(avg_path, base_config.artifact_dir / "avg_ckpts", args.avg_n):
+                    print(f"Rebuilding averaged checkpoint: {avg_path}")
+                    average_checkpoints(base_config.artifact_dir / "avg_ckpts", args.avg_n, avg_path)
+                else:
+                    print(f"Using cached averaged checkpoint: {avg_path}")
+                model, src_tok, tgt_tok, config, device = load_avg_checkpoint(avg_path)
+            else:
+                model, src_tok, tgt_tok, config, device = load_checkpoint(checkpoint_paths[0])
         else:
             print("Loading ensemble checkpoints:")
             for checkpoint_path_item in checkpoint_paths:

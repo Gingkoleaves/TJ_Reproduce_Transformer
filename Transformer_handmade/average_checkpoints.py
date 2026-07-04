@@ -17,21 +17,15 @@ import torch
 from Transformer_handmade.config import get_config
 
 
-def main() -> None:
-    config = get_config()
-    parser = argparse.ArgumentParser(description="Average the last N checkpoint snapshots.")
-    parser.add_argument("--snapshot-dir", type=Path, default=config.artifact_dir / "avg_ckpts")
-    parser.add_argument("--n", type=int, default=5, help="Number of most-recent snapshots to average.")
-    parser.add_argument("--output", type=Path, default=config.artifact_dir / "pytorch_transformer_avg.pt")
-    args = parser.parse_args()
-
-    snapshots = sorted(args.snapshot_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
+def average_checkpoints(snapshot_dir: Path, n: int, output: Path) -> Path:
+    snapshots = sorted(snapshot_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
     if not snapshots:
-        raise FileNotFoundError(f"No snapshots found in {args.snapshot_dir}")
-    snapshots = snapshots[-args.n:]
+        raise FileNotFoundError(f"No snapshots found in {snapshot_dir}")
+
+    snapshots = snapshots[-n:]
     print(f"Averaging {len(snapshots)} snapshots:")
-    for p in snapshots:
-        print(f"  {p}")
+    for path in snapshots:
+        print(f"  {path}")
 
     avg_state = None
     ref_ckpt = None
@@ -40,14 +34,15 @@ def main() -> None:
         ref_ckpt = ref_ckpt or ckpt
         sd = ckpt["model_state_dict"]
         if avg_state is None:
-            avg_state = {k: v.clone().float() for k, v in sd.items()}
+            avg_state = {key: value.clone().float() for key, value in sd.items()}
         else:
-            for k, v in sd.items():
-                avg_state[k] += v.float()
+            for key, value in sd.items():
+                avg_state[key] += value.float()
 
-    for k in avg_state:
-        avg_state[k] /= len(snapshots)
-        avg_state[k] = avg_state[k].to(ref_ckpt["model_state_dict"][k].dtype)
+    assert avg_state is not None and ref_ckpt is not None
+    for key in avg_state:
+        avg_state[key] /= len(snapshots)
+        avg_state[key] = avg_state[key].to(ref_ckpt["model_state_dict"][key].dtype)
 
     torch.save(
         {
@@ -56,11 +51,22 @@ def main() -> None:
             "config": ref_ckpt["config"],
             "src_vocab_size": ref_ckpt["src_vocab_size"],
             "tgt_vocab_size": ref_ckpt["tgt_vocab_size"],
-            "averaged_from_steps": [int(p.stem.split("_")[1]) for p in snapshots],
+            "averaged_from_steps": [int(path.stem.split("_")[1]) for path in snapshots],
         },
-        args.output,
+        output,
     )
-    print(f"Averaged checkpoint saved to {args.output}")
+    print(f"Averaged checkpoint saved to {output}")
+    return output
+
+
+def main() -> None:
+    config = get_config()
+    parser = argparse.ArgumentParser(description="Average the last N checkpoint snapshots.")
+    parser.add_argument("--snapshot-dir", type=Path, default=config.artifact_dir / "avg_ckpts")
+    parser.add_argument("--n", type=int, default=5, help="Number of most-recent snapshots to average.")
+    parser.add_argument("--output", type=Path, default=config.artifact_dir / "pytorch_transformer_avg.pt")
+    args = parser.parse_args()
+    average_checkpoints(args.snapshot_dir, args.n, args.output)
 
 
 if __name__ == "__main__":
