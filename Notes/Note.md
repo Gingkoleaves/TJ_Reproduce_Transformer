@@ -224,7 +224,7 @@ LengthGroupedBatchSampler：在DataLoader中，接受的“长度信息”，给
 TranslationBatch：存储最终整理好的数据结构（Tensor 和 Mask），直接送往模型进行训练
 
 DataLoader：PyTorch 原生组件。通过 BatchSampler 选定句子索引并通过Dateset.getitem(idx)得到token串，最后调用 collate_fn 进行最终组装。
-![pipeline-workflow](image.png)
+![pipeline-workflow](assets/image.png)
 
 ## transformer
 

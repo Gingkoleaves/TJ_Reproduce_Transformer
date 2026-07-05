@@ -18,11 +18,13 @@ Both share the hand-rolled training infrastructure: BPE tokenizer, NoamOpt sched
 | Decode | Samples | BLEU | Paper (base, en-de) |
 |--------|---------|------|-------------|
 | Greedy | 3003 (full test) | 26.93 | — |
-| Beam-4 (α=0.6) | 3003 (full test) | **28.19** | **27.3** |
+| Beam-4 (α=0.6) | 3003 (full test) | **28.19** | — |
 
 BLEU breakdown (beam-4, full): `63.1/36.4/23.0/14.8  BP=0.948`
 
 Note: this result isn't directly comparable to the paper's 27.3 — it's the easier DE→EN direction, not EN→DE.
+
+![main Run 1 loss curves](Notes/assets/loss_main_run1.png)
 
 #### Run 2 — EN→DE, true 25K-token batches (RTX 4090 48GB, 100K/100K steps, no ckpt averaging)
 
@@ -37,6 +39,8 @@ BLEU breakdown (single ckpt): `55.4/29.7/18.1/11.5  BP=1.000 ratio=1.029`
 BLEU breakdown (avg ckpt): `55.7/30.1/18.5/11.8  BP=1.000 ratio=1.029`
 
 Checkpoint averaging adds **+0.38** here (24.21 → 24.59), replicating the `dev1` finding (+0.51) on an independent implementation and machine — the technique's contribution is consistent across both codebases.
+
+![main Run 2 loss curves](Notes/assets/loss_main_run2.png)
 
 **This cross-validates both implementations and the batching strategy** against `dev1` Run 2 (hand-rolled modules, 12K tokens × grad_accum 2, 24.26 at 100K steps, val_loss 3.016):
 - `nn.Transformer` vs hand-rolled → **24.21 vs 24.26** (Δ0.05, within noise): the hand-rolled encoder/decoder/attention is functionally equivalent to PyTorch's reference implementation.
@@ -60,6 +64,10 @@ BLEU breakdown (beam-4, full): `52.9/26.3/14.9/8.8  BP=1.000 ratio=1.019`
 Val loss trajectory (last 20K steps, still trending down when stopped):
 `74K: 3.38 → 78K: 3.34 → 82K: 3.31 → 86K: 3.28 → 90K: 3.26 → 92K: 3.257`
 
+![dev1 Run 1 loss curves](Notes/assets/loss_dev1_run1.png)
+
+The loss curves reveal an anomaly the summary numbers hide: **val loss diverged from ~16K to 58K steps** (climbing from 4.87 to a plateau around 7.0–7.37) while train loss kept falling normally, then abruptly recovered from step 60K onward. Roughly 40K of the 92K steps were spent in this diverged regime, which — on top of the early stop — helps explain the low 20.69 BLEU relative to Run 2's 24.26.
+
 #### Run 2 — token-budget batching, paper-scale batches (single RTX 5090, ~9.7 hours, 100K/100K steps) ⭐ current
 
 Retrained from scratch (2026-07-03 → 07-04) after switching the dataloader to **token-budget batching**: `max_tokens_per_batch=12000 × grad_accum=2 = 24K tokens/step`, matching the paper's ~25K-token effective batch. Final `val_loss = 3.016`.
@@ -71,6 +79,8 @@ Retrained from scratch (2026-07-03 → 07-04) after switching the dataloader to 
 BLEU breakdown (beam-4, full): `55.9/29.8/18.0/11.5  BP=1.000 ratio=1.016`
 
 **Run 2 vs Run 1: +3.57 BLEU (20.69 → 24.26), val_loss 3.257 → 3.016, and ~2 hours *less* wall-clock time.** The only substantive change is the batching strategy: length-bucketed token-budget batches waste far fewer pad tokens per step and deliver the paper's effective batch size, so each step is both cheaper and more informative. This closes most of the gap to the paper's 27.3; the remainder is consistent with the paper's use of checkpoint averaging and a multi-GPU setup.
+
+![dev1 Run 2 loss curves](Notes/assets/loss_dev1_run2.png)
 
 #### Run 2 (continued) — +20K steps & checkpoint averaging (paper §5.3) ⭐ best
 
@@ -87,6 +97,12 @@ BLEU breakdown (avg ckpt, beam-4, full): `56.1/30.3/18.6/11.9  BP=1.000 ratio=1.
 **The +0.5 BLEU comes almost entirely from checkpoint averaging, not the extra training.** The single-checkpoint ablation isolates the two effects: 20K extra steps moved BLEU by only +0.02 (24.26 → 24.28 — training has plateaued), while averaging the last 5 snapshots added **+0.51** over the single 120K checkpoint (24.28 → 24.79), squarely in the +0.3–0.5 range typically attributed to this technique. All four n-gram precisions improve.
 
 Metric note: sacrebleu (detokenized 13a) reads below the paper's tokenized BLEU + compound splitting. Re-scoring these same predictions with an approximation of the paper's recipe (13a tokenization + `##AT##` compound splitting) gives **25.23** (25.47 with intl tokenization), so 24.79 corresponds to roughly ~25.5–26 in the paper's metric — the true quality gap to 27.3 is ~1.3–1.8 BLEU, not ~2.5.
+
+### Loss curves — all four runs
+
+![Validation loss, all four runs](Notes/assets/loss_all_runs.png)
+
+The three EN→DE runs converge to val loss ≈ 3.0–3.26 regardless of implementation (`nn.Transformer` vs hand-rolled) and batching strategy, while DE→EN (main Run 1) sits slightly lower (2.96) — consistent with it being the easier direction. dev1 Run 1's mid-run val-loss divergence (16K–58K) is clearly visible; both Run 2s show none of it.
 
 ## Project Structure
 

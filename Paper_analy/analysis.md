@@ -18,7 +18,7 @@ For English-French, we used the significantly larger WMT 2014 English-French dat
 ## Evaluation
 
 BLUE on E2G and E2F:
-![BLUE on E2G and E2F](image.png)
+![BLUE on E2G and E2F](assets/image.png)
 
 Different config result:
-![Model config](image-1.png)
+![Model config](assets/image-1.png)
