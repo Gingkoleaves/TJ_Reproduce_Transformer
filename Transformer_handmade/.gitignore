@@ -1,4 +1,6 @@
 __pycache__
 artifacts/*
+artifacts_smoke/*
 
 !artifacts/pytorch_transformer.pt
+!artifacts/logs/*

@@ -1,1 +1,9 @@
 Transformer_handmade/artifacts/pytorch_transformer.pt filter=lfs diff=lfs merge=lfs -text
+Transformer_handmade/artifacts/test_lengths.pt filter=lfs diff=lfs merge=lfs -text
+Transformer_handmade/artifacts/tokenizer.bpe.json filter=lfs diff=lfs merge=lfs -text
+Transformer_handmade/artifacts/tokenizer.json filter=lfs diff=lfs merge=lfs -text
+Transformer_handmade/artifacts/train_lengths.pt filter=lfs diff=lfs merge=lfs -text
+Transformer_handmade/artifacts/valid_lengths.pt filter=lfs diff=lfs merge=lfs -text
+Transformer_handmade/artifacts_smoke/test_lengths.pt filter=lfs diff=lfs merge=lfs -text
+Transformer_handmade/artifacts_smoke/train_lengths.pt filter=lfs diff=lfs merge=lfs -text
+Transformer_handmade/artifacts_smoke/valid_lengths.pt filter=lfs diff=lfs merge=lfs -text
