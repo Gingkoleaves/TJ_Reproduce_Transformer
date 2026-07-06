@@ -1,4 +1,4 @@
-# Recurrence Transformer
+# Reproduce Transformer
 
 Reproduction of the Transformer model from ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762) (Vaswani et al., 2017) for WMT14 machine translation.
 
